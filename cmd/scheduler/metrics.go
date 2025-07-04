@@ -169,18 +169,13 @@ func (cc ClusterManagerCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 
-	ctrvGPUDeviceAllocatedDesc := prometheus.NewDesc(
-		"vGPUPodsDeviceAllocated",
-		"vGPU Allocated from pods",
-		[]string{"podnamespace", "nodename", "podname", "containeridx", "deviceuuid", "deviceusedcore"}, nil,
-	)
-	ctrvGPUdeviceAllocatedMemoryPercentageDesc := prometheus.NewDesc(
-		"vGPUMemoryPercentage",
-		"vGPU memory percentage allocated from a container",
+	ctrvGPUdeviceAllocatedMemoryDesc := prometheus.NewDesc(
+		"vGPUMemoryAllocated",
+		"vGPU memory allocated from a container",
 		[]string{"podnamespace", "nodename", "podname", "containeridx", "deviceuuid"}, nil,
 	)
 	ctrvGPUdeviceAllocateCorePercentageDesc := prometheus.NewDesc(
-		"vGPUCorePercentage",
+		"vGPUCoreAllocatedPercentage",
 		"vGPU core allocated from a container",
 		[]string{"podnamespace", "nodename", "podname", "containeridx", "deviceuuid"}, nil,
 	)
@@ -202,11 +197,6 @@ func (cc ClusterManagerCollector) Collect(ch chan<- prometheus.Metric) {
 							val.Namespace, val.Name, ctridx, val.NodeID)
 						continue
 					}
-					ch <- prometheus.MustNewConstMetric(
-						ctrvGPUDeviceAllocatedDesc,
-						prometheus.GaugeValue,
-						float64(ctrdevval.Usedmem)*float64(1024)*float64(1024),
-						val.Namespace, val.NodeID, val.Name, fmt.Sprint(ctridx), ctrdevval.UUID, fmt.Sprint(ctrdevval.Usedcores))
 					var totaldev int32
 					found := false
 					for _, ni := range *nu {
@@ -229,9 +219,9 @@ func (cc ClusterManagerCollector) Collect(ch chan<- prometheus.Metric) {
 					)
 					if totaldev > 0 {
 						ch <- prometheus.MustNewConstMetric(
-							ctrvGPUdeviceAllocatedMemoryPercentageDesc,
+							ctrvGPUdeviceAllocatedMemoryDesc,
 							prometheus.GaugeValue,
-							float64(ctrdevval.Usedmem)/float64(totaldev),
+							float64(ctrdevval.Usedmem)*float64(1024)*float64(1024),
 							val.Namespace, val.NodeID, val.Name, fmt.Sprint(ctridx), ctrdevval.UUID)
 					}
 					ch <- prometheus.MustNewConstMetric(
