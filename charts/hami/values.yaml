@@ -119,6 +119,9 @@ scheduler:
       - --policy-config-file=/config/config.json
       - -v=4
   extender:
+    ## Optional override for kube-scheduler extender urlPrefix (e.g. https://127.0.0.1:8443 for local debug).
+    ## If empty, defaults to https://127.0.0.1:443 when admission webhook is enabled, else http://127.0.0.1:80.
+    urlPrefixOverride: ""
     ## @param image.registry scheduler extender image registry
     ## @param image.repository scheduler extender image repository
     ## @param image.tag scheduler extender image tag (immutable tags are recommended)
