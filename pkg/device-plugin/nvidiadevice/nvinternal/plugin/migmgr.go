@@ -251,6 +251,148 @@ func (m *MigInstanceManager) EnsurePrimed(gpuIndex, templateIdx int, geometry de
 	return m.RebuildForGPU(gpuIndex, templateIdx, geometry)
 }
 
+// PrepareGPU readies a GPU for on-demand slot creation under the given
+// template, replacing the "full nvidia-mig-parted apply at first allocation"
+// dance that resharded the entire card. It:
+//
+//   - Enables MIG mode on the card if not already enabled.
+//   - Refuses the allocation (ErrTemplateConflict) if the card currently has
+//     Present slots under a different templateIdx — the scheduler is supposed
+//     to prevent this, but we defend at the boundary so we never destroy a
+//     running task's GPU instance underfoot.
+//   - Discards any absent-slot bookkeeping from a prior, now-idle template.
+//   - Seeds the slot map for (gpuIndex, templateIdx) by adopting live GIs
+//     that match the geometry (plugin-restart case) or starting empty (fresh
+//     card case). Subsequent EnsureSlot calls create GIs on demand.
+func (m *MigInstanceManager) PrepareGPU(gpuIndex, templateIdx int, geometry device.Geometry) error {
+	dev, ret := nvml.DeviceGetHandleByIndex(gpuIndex)
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("nvml get handle by index %d: %s", gpuIndex, nvml.ErrorString(ret))
+	}
+
+	lk := m.gpuLock(gpuIndex)
+	lk.Lock()
+	if err := ensureMigModeEnabled(dev); err != nil {
+		lk.Unlock()
+		return err
+	}
+
+	// Scan current slot state for conflicts and for stale bookkeeping.
+	m.mu.Lock()
+	primedSameTmpl := false
+	hasOtherTmpl := false
+	otherTmplInUse := false
+	for k, inst := range m.bySlot {
+		if k.GPUIndex != gpuIndex {
+			continue
+		}
+		if k.TemplateIdx == templateIdx {
+			primedSameTmpl = true
+			continue
+		}
+		hasOtherTmpl = true
+		if inst.Present {
+			otherTmplInUse = true
+		}
+	}
+	m.mu.Unlock()
+
+	if otherTmplInUse {
+		lk.Unlock()
+		return fmt.Errorf("gpu %d has live MIG instances under a different template; refusing template switch", gpuIndex)
+	}
+	if primedSameTmpl {
+		lk.Unlock()
+		return nil
+	}
+	if hasOtherTmpl {
+		// Prior template is idle — drop its absent slots so the new template's
+		// slot map can be seeded cleanly, and destroy any live GIs that belong
+		// to the old shape before we adopt the new one.
+		m.mu.Lock()
+		for k := range m.bySlot {
+			if k.GPUIndex == gpuIndex {
+				delete(m.bySlot, k)
+			}
+		}
+		for uuid, k := range m.byMigUUID {
+			if k.GPUIndex == gpuIndex {
+				delete(m.byMigUUID, uuid)
+			}
+		}
+		m.mu.Unlock()
+		if err := destroyAllMigInstances(dev); err != nil {
+			lk.Unlock()
+			return err
+		}
+	}
+	lk.Unlock()
+
+	// RebuildForGPU takes the gpuLock itself; call it without holding it here.
+	// It adopts any remaining live GIs that fit the geometry, or seeds an
+	// all-absent slot map on an unpartitioned card.
+	return m.RebuildForGPU(gpuIndex, templateIdx, geometry)
+}
+
+// ensureMigModeEnabled turns on MIG mode via NVML when the card is currently
+// in non-MIG mode. No-op when MIG mode is unsupported (non-MIG cards) so the
+// caller can invoke it uniformly.
+func ensureMigModeEnabled(dev nvml.Device) error {
+	curMode, _, ret := dev.GetMigMode()
+	if ret == nvml.ERROR_NOT_SUPPORTED {
+		return nil
+	}
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("get mig mode: %s", nvml.ErrorString(ret))
+	}
+	if curMode == nvml.DEVICE_MIG_ENABLE {
+		return nil
+	}
+	if _, ret := dev.SetMigMode(nvml.DEVICE_MIG_ENABLE); ret != nvml.SUCCESS {
+		return fmt.Errorf("enable mig mode: %s", nvml.ErrorString(ret))
+	}
+	return nil
+}
+
+// destroyAllMigInstances enumerates and destroys every GI+CI on the device.
+// Used on template switches when no scheduler-allocated slot is in use.
+func destroyAllMigInstances(dev nvml.Device) error {
+	for _, giProfileID := range []int{
+		nvml.GPU_INSTANCE_PROFILE_1_SLICE,
+		nvml.GPU_INSTANCE_PROFILE_2_SLICE,
+		nvml.GPU_INSTANCE_PROFILE_3_SLICE,
+		nvml.GPU_INSTANCE_PROFILE_4_SLICE,
+		nvml.GPU_INSTANCE_PROFILE_6_SLICE,
+		nvml.GPU_INSTANCE_PROFILE_7_SLICE,
+		nvml.GPU_INSTANCE_PROFILE_8_SLICE,
+	} {
+		info, ret := dev.GetGpuInstanceProfileInfo(giProfileID)
+		if ret != nvml.SUCCESS {
+			continue
+		}
+		gis, ret := dev.GetGpuInstances(&info)
+		if ret != nvml.SUCCESS {
+			continue
+		}
+		for _, gi := range gis {
+			ciInfoRet := profileIDToCIProfileID(giProfileID)
+			if ciInfo, r := gi.GetComputeInstanceProfileInfo(ciInfoRet, nvml.COMPUTE_INSTANCE_ENGINE_PROFILE_SHARED); r == nvml.SUCCESS {
+				if cis, r2 := gi.GetComputeInstances(&ciInfo); r2 == nvml.SUCCESS {
+					for _, ci := range cis {
+						if d := ci.Destroy(); d != nvml.SUCCESS {
+							return fmt.Errorf("destroy compute instance: %s", nvml.ErrorString(d))
+						}
+					}
+				}
+			}
+			if d := gi.Destroy(); d != nvml.SUCCESS {
+				return fmt.Errorf("destroy gpu instance: %s", nvml.ErrorString(d))
+			}
+		}
+	}
+	return nil
+}
+
 // Release destroys the GI+CI bound to the given MIG UUID and marks the slot
 // absent (preserving its profile and placement). Invoked by the podresources
 // watcher when kubelet reports the device is no longer in use.

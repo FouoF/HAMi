@@ -811,6 +811,17 @@ func (nv *NvidiaGPUDevices) Fit(devices []*device.DeviceUsage, request device.Co
 			continue
 		}
 		if !nv.CustomFilterRule(allocated, request, tmpDevs[k.Type], dev) {
+			// In MIG mode, CustomFilterRule rejects when the requested memory
+			// doesn't fit any free slot of the device's current template —
+			// i.e. the MIG topology can't accommodate this request without
+			// resharding, which would require destroying in-use GPU
+			// instances. Surface this as a distinct reason so users can tell
+			// topology infeasibility apart from generic filter failure.
+			if dev.Mode == MigMode {
+				reason[common.CardMigTopologyInfeasible]++
+				klog.V(5).InfoS(common.CardMigTopologyInfeasible, "pod", klog.KObj(pod), "device", dev.ID, "device index", i, "usage", dev.MigUsage)
+				continue
+			}
 			reason[common.CardNotFoundCustomFilterRule]++
 			klog.V(5).InfoS(common.CardNotFoundCustomFilterRule, "pod", klog.KObj(pod), "device", dev.ID, "device index", i)
 			continue

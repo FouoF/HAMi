@@ -437,37 +437,45 @@ func deepCopyMigConfig(src nvidia.MigConfigSpec) nvidia.MigConfigSpec {
 
 func (nv *NvidiaDevicePlugin) GetContainerDeviceStrArray(c device.ContainerDevices) []string {
 	tmp := []string{}
-	needsreset := false
-	position := 0
 	for _, val := range c {
 		if !strings.Contains(val.UUID, "[") {
 			tmp = append(tmp, val.UUID)
 			continue
 		}
 		devtype, devindex := GetIndexAndTypeFromUUID(val.UUID)
-		position, needsreset = nv.GenerateMigTemplate(devtype, devindex, val)
-		if needsreset {
-			nv.ApplyMigTemplate()
-		}
-		if uuid, ok := nv.resolveMigUUIDViaManager(val.UUID, devtype, devindex, position, needsreset); ok {
+
+		// Prefer the on-demand path: migMgr creates just the requested
+		// (templateIdx, positionIdx) slot via NVML, skipping the full
+		// nvidia-mig-parted apply that resharded the whole card.
+		if uuid, ok := nv.resolveMigUUIDOnDemand(val.UUID, devtype, devindex); ok {
 			tmp = append(tmp, uuid)
 			continue
 		}
+
+		// Legacy fallback: mig-parted reshard + index-based UUID lookup.
+		// Retained for migMgr=nil (non-"mig" operating mode) and for bailouts
+		// when PrepareGPU refuses (e.g. template conflict — surfaces upward
+		// as allocation failure via empty fallback result).
+		position, needsreset := nv.GenerateMigTemplate(devtype, devindex, val)
+		if needsreset {
+			nv.ApplyMigTemplate()
+		}
 		tmp = append(tmp, GetMigUUIDFromIndex(val.UUID, position))
 	}
-	klog.V(3).Infoln("mig current=", nv.migCurrent, ":", needsreset, "position=", position, "uuid lists", tmp)
+	klog.V(3).Infoln("mig current=", nv.migCurrent, "uuid lists", tmp)
 	return tmp
 }
 
-// resolveMigUUIDViaManager routes the MIG UUID lookup through migMgr when it
-// is enabled. After a fresh ApplyMigTemplate it rebuilds the slot map; on a
-// cold plugin start it primes lazily. Returns (uuid, true) on success, or
-// ("", false) to fall back to the legacy GetMigUUIDFromIndex path.
-func (nv *NvidiaDevicePlugin) resolveMigUUIDViaManager(uuid, devtype string, devindex, position int, applied bool) (string, bool) {
+// resolveMigUUIDOnDemand drives the migMgr-based path: it readies the target
+// GPU (enables MIG mode, clears stale template state, seeds the slot map) and
+// creates the requested slot's GI+CI on demand. Returns (uuid, true) on
+// success; (_, false) means the caller should fall back to the legacy
+// mig-parted flow.
+func (nv *NvidiaDevicePlugin) resolveMigUUIDOnDemand(uuid, devtype string, devindex int) (string, bool) {
 	if nv.migMgr == nil {
 		return "", false
 	}
-	templateIdx, _, err := device.ExtractMigTemplatesFromUUID(uuid)
+	templateIdx, position, err := device.ExtractMigTemplatesFromUUID(uuid)
 	if err != nil {
 		klog.InfoS("extract template index failed; falling back", "uuid", uuid, "err", err)
 		return "", false
@@ -477,16 +485,9 @@ func (nv *NvidiaDevicePlugin) resolveMigUUIDViaManager(uuid, devtype string, dev
 		klog.InfoS("no geometry matches device; falling back", "devtype", devtype, "templateIdx", templateIdx)
 		return "", false
 	}
-	if applied {
-		if err := nv.migMgr.RebuildForGPU(devindex, templateIdx, geometry); err != nil {
-			klog.InfoS("RebuildForGPU failed; falling back", "gpu", devindex, "err", err)
-			return "", false
-		}
-	} else {
-		if err := nv.migMgr.EnsurePrimed(devindex, templateIdx, geometry); err != nil {
-			klog.InfoS("EnsurePrimed failed; falling back", "gpu", devindex, "err", err)
-			return "", false
-		}
+	if err := nv.migMgr.PrepareGPU(devindex, templateIdx, geometry); err != nil {
+		klog.InfoS("PrepareGPU failed; falling back to mig-parted", "gpu", devindex, "err", err)
+		return "", false
 	}
 	out, err := nv.migMgr.EnsureSlot(devindex, templateIdx, position)
 	if err != nil {
