@@ -60,6 +60,7 @@ import (
 
 	"github.com/Project-HAMi/HAMi/pkg/device-plugin/nvidiadevice/nvinternal/cdi"
 	"github.com/Project-HAMi/HAMi/pkg/device-plugin/nvidiadevice/nvinternal/imex"
+	"github.com/Project-HAMi/HAMi/pkg/device-plugin/nvidiadevice/nvinternal/podresources"
 	"github.com/Project-HAMi/HAMi/pkg/device-plugin/nvidiadevice/nvinternal/rm"
 	"github.com/Project-HAMi/HAMi/pkg/device/nvidia"
 	"github.com/Project-HAMi/HAMi/pkg/scheduler/config"
@@ -108,6 +109,11 @@ type NvidiaDevicePlugin struct {
 	operatingMode string
 	migCurrent    nvidia.MigPartedSpec
 	deviceCache   string
+
+	// migMgr tracks live MIG GI+CI instances so we can destroy and recreate
+	// them per-task rather than resharding the whole card. Only set when
+	// operatingMode == "mig".
+	migMgr *MigInstanceManager
 
 	imexChannels imex.Channels
 
@@ -330,6 +336,25 @@ func (plugin *NvidiaDevicePlugin) Start(kubeletSocket string) error {
 
 	if deviceSupportMig {
 		plugin.ApplyMigTemplate()
+	}
+
+	if plugin.operatingMode == "mig" {
+		plugin.migMgr = NewMigInstanceManager()
+		// Slot-map is populated lazily on the first Allocate for each GPU
+		// (see util.go GetContainerDeviceStrArray) — we can't rebuild here
+		// because templateIdx/geometry isn't known until an allocation
+		// references them. The watcher's release callback tolerates an
+		// unknown MIG UUID, so early kubelet reports before the first
+		// allocation are harmless.
+		watcher := podresources.NewWatcher("", 0, []string{string(plugin.rm.Resource())}, func(_ string, deviceID string) {
+			if !strings.HasPrefix(deviceID, "MIG-") {
+				return
+			}
+			if err := plugin.migMgr.Release(deviceID); err != nil {
+				klog.InfoS("failed to release MIG instance on reclaim", "deviceID", deviceID, "err", err)
+			}
+		})
+		go watcher.Run(plugin.ctx)
 	}
 
 	return nil

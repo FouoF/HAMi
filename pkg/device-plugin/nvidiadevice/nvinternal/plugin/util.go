@@ -442,17 +442,74 @@ func (nv *NvidiaDevicePlugin) GetContainerDeviceStrArray(c device.ContainerDevic
 	for _, val := range c {
 		if !strings.Contains(val.UUID, "[") {
 			tmp = append(tmp, val.UUID)
-		} else {
-			devtype, devindex := GetIndexAndTypeFromUUID(val.UUID)
-			position, needsreset = nv.GenerateMigTemplate(devtype, devindex, val)
-			if needsreset {
-				nv.ApplyMigTemplate()
-			}
-			tmp = append(tmp, GetMigUUIDFromIndex(val.UUID, position))
+			continue
 		}
+		devtype, devindex := GetIndexAndTypeFromUUID(val.UUID)
+		position, needsreset = nv.GenerateMigTemplate(devtype, devindex, val)
+		if needsreset {
+			nv.ApplyMigTemplate()
+		}
+		if uuid, ok := nv.resolveMigUUIDViaManager(val.UUID, devtype, devindex, position, needsreset); ok {
+			tmp = append(tmp, uuid)
+			continue
+		}
+		tmp = append(tmp, GetMigUUIDFromIndex(val.UUID, position))
 	}
 	klog.V(3).Infoln("mig current=", nv.migCurrent, ":", needsreset, "position=", position, "uuid lists", tmp)
 	return tmp
+}
+
+// resolveMigUUIDViaManager routes the MIG UUID lookup through migMgr when it
+// is enabled. After a fresh ApplyMigTemplate it rebuilds the slot map; on a
+// cold plugin start it primes lazily. Returns (uuid, true) on success, or
+// ("", false) to fall back to the legacy GetMigUUIDFromIndex path.
+func (nv *NvidiaDevicePlugin) resolveMigUUIDViaManager(uuid, devtype string, devindex, position int, applied bool) (string, bool) {
+	if nv.migMgr == nil {
+		return "", false
+	}
+	templateIdx, _, err := device.ExtractMigTemplatesFromUUID(uuid)
+	if err != nil {
+		klog.InfoS("extract template index failed; falling back", "uuid", uuid, "err", err)
+		return "", false
+	}
+	geometry, ok := nv.lookupGeometry(devtype, templateIdx)
+	if !ok {
+		klog.InfoS("no geometry matches device; falling back", "devtype", devtype, "templateIdx", templateIdx)
+		return "", false
+	}
+	if applied {
+		if err := nv.migMgr.RebuildForGPU(devindex, templateIdx, geometry); err != nil {
+			klog.InfoS("RebuildForGPU failed; falling back", "gpu", devindex, "err", err)
+			return "", false
+		}
+	} else {
+		if err := nv.migMgr.EnsurePrimed(devindex, templateIdx, geometry); err != nil {
+			klog.InfoS("EnsurePrimed failed; falling back", "gpu", devindex, "err", err)
+			return "", false
+		}
+	}
+	out, err := nv.migMgr.EnsureSlot(devindex, templateIdx, position)
+	if err != nil {
+		klog.InfoS("EnsureSlot failed; falling back", "gpu", devindex, "slot", position, "err", err)
+		return "", false
+	}
+	return out, true
+}
+
+// lookupGeometry returns the scheduler-configured Geometry for a given device
+// model and template index. Mirrors the model-matching loop in
+// GenerateMigTemplate so migMgr shares the scheduler's view of the layout.
+func (nv *NvidiaDevicePlugin) lookupGeometry(devtype string, templateIdx int) (device.Geometry, bool) {
+	for _, mt := range nv.schedulerConfig.MigGeometriesList {
+		if !containsModel(devtype, mt.Models) {
+			continue
+		}
+		if templateIdx < 0 || templateIdx >= len(mt.Geometries) {
+			return nil, false
+		}
+		return mt.Geometries[templateIdx], true
+	}
+	return nil, false
 }
 
 func PodAllocationTrySuccess(nodeName string, devName string, lockName string, pod *corev1.Pod) {
