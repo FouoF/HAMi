@@ -16,7 +16,7 @@
 | `openssl` | 用于在本地生成自签名 TLS 证书（仅当证书目录中尚无 `tls.crt` / `tls.key` 时）。 |
 | 集群中的 HAMi | 存在带标签 `app.kubernetes.io/component=hami-scheduler` 的 Deployment；且存在名为 `{deploymentName}-device` 的 ConfigMap（与 Chart 默认命名一致）。 |
 
-安装 Telepresence 请参考官方文档：[Install Telepresence](https://www.telepresence.io/docs/latest/install/)。
+安装 Telepresence 请参考官方文档：[Install Telepresence](https://telepresence.io/docs/quick-start)。
 
 ## 工作原理（简要）
 

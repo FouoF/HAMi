@@ -16,7 +16,7 @@ This document explains how to use [`hack/debug-scheduler-extender-local.sh`](../
 | `openssl` | Used to generate local self-signed TLS certs when `tls.crt`/`tls.key` do not exist yet. |
 | HAMi resources in cluster | A Deployment with label `app.kubernetes.io/component=hami-scheduler` exists, and a ConfigMap named `{deploymentName}-device` exists (chart default naming). |
 
-For Telepresence installation, see [Install Telepresence](https://www.telepresence.io/docs/latest/install/).
+For Telepresence installation, see [Install Telepresence](https://telepresence.io/docs/quick-start).
 
 ## How It Works (High Level)
 
