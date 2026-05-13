@@ -183,6 +183,23 @@ func (dev *EnflameDevices) GetNodeDevices(n corev1.Node) ([]*device.DeviceInfo, 
 	if err := json.Unmarshal([]byte(capacityRaw), &spec); err != nil {
 		return []*device.DeviceInfo{}, fmt.Errorf("failed to parse %s: %w", GCUDrsCapacity, err)
 	}
+	maxSlice := 0
+	maxMemGB := 0
+	for profileName := range spec.Profiles {
+		slice, memGB := parseProfile(profileName)
+		if slice > maxSlice {
+			maxSlice = slice
+		}
+		if memGB > maxMemGB {
+			maxMemGB = memGB
+		}
+	}
+	if maxSlice <= 0 {
+		return []*device.DeviceInfo{}, fmt.Errorf("no valid drs profiles found on node %s", n.Name)
+	}
+	if maxMemGB <= 0 {
+		maxMemGB = maxSlice
+	}
 	nodedevices := make([]*device.DeviceInfo, 0, len(spec.Devices))
 	for idx, d := range spec.Devices {
 		devIndex, err := strconv.Atoi(d.Index)
@@ -203,7 +220,7 @@ func (dev *EnflameDevices) GetNodeDevices(n corev1.Node) ([]*device.DeviceInfo, 
 			Index:        uint(devIndex),
 			ID:           fmt.Sprintf("%s-enflame-drs-%d", n.Name, devIndex),
 			Count:        capacity,
-			Devmem:       capacity,
+			Devmem:       int32(maxMemGB * 1024),
 			Devcore:      100,
 			Type:         EnflameVGCUDevice,
 			Numa:         0,
@@ -213,6 +230,7 @@ func (dev *EnflameDevices) GetNodeDevices(n corev1.Node) ([]*device.DeviceInfo, 
 				"minor":    minor,
 				"index":    strconv.Itoa(devIndex),
 				"profiles": profiles,
+				"maxSlice": maxSlice,
 			},
 		})
 	}
@@ -235,12 +253,16 @@ func (dev *EnflameDevices) PatchAnnotations(pod *corev1.Pod, annoinput *map[stri
 				continue
 			}
 			chosen := ctrDevices[0]
+			slice := int32(readCustomInfoInt(chosen.CustomInfo, "drsSlice"))
+			if slice <= 0 {
+				slice = 1
+			}
 			ctrName := containerNameByIndex(pod, ctridx)
 			profileName := readCustomInfoString(chosen.CustomInfo, "profileName")
 			profileID := readCustomInfoString(chosen.CustomInfo, "profileID")
 			assigned[ctrName] = assignedContainerInfo{
 				Allocated:   false,
-				Request:     chosen.Usedmem,
+				Request:     slice,
 				ProfileID:   profileID,
 				ProfileName: profileName,
 			}
@@ -256,8 +278,8 @@ func (dev *EnflameDevices) PatchAnnotations(pod *corev1.Pod, annoinput *map[stri
 					(*annoinput)[PodAssignedGCUMin] = minor
 				}
 			}
-			if _, exists := (*annoinput)[PodRequestGCUSize]; !exists && chosen.Usedmem > 0 {
-				(*annoinput)[PodRequestGCUSize] = strconv.FormatInt(int64(chosen.Usedmem), 10)
+			if _, exists := (*annoinput)[PodRequestGCUSize]; !exists && slice > 0 {
+				(*annoinput)[PodRequestGCUSize] = strconv.FormatInt(int64(slice), 10)
 			}
 		}
 		if len(assigned) > 0 {
@@ -346,7 +368,11 @@ func (dev *EnflameDevices) ScoreNode(node *corev1.Node, podDevices device.PodSin
 }
 
 func (dev *EnflameDevices) AddResourceUsage(pod *corev1.Pod, n *device.DeviceUsage, ctr *device.ContainerDevice) error {
-	n.Used++
+	slice := int32(readCustomInfoInt(ctr.CustomInfo, "drsSlice"))
+	if slice <= 0 {
+		slice = 1
+	}
+	n.Used += slice
 	n.Usedcores += ctr.Usedcores
 	n.Usedmem += ctr.Usedmem
 	return nil
@@ -367,6 +393,15 @@ func (enf *EnflameDevices) Fit(devices []*device.DeviceUsage, request device.Con
 	if requiredSlice <= 0 {
 		reason[common.ModeNotFit]++
 		return false, tmpDevs, common.GenReason(reason, len(devices))
+	}
+	profileMemoryMiB := int32(profile.MemoryGB * 1024)
+	if profileMemoryMiB <= 0 {
+		reason[common.ModeNotFit]++
+		return false, tmpDevs, common.GenReason(reason, len(devices))
+	}
+	profileCorePercent := int32(profile.CorePercent)
+	if profileCorePercent <= 0 {
+		profileCorePercent = 1
 	}
 	for i := len(devices) - 1; i >= 0; i-- {
 		dev := devices[i]
@@ -389,9 +424,14 @@ func (enf *EnflameDevices) Fit(devices []*device.DeviceUsage, request device.Con
 			klog.V(5).InfoS(common.CardTimeSlicingExhausted, "pod", klog.KObj(pod), "device", dev.ID, "count", dev.Count, "used", dev.Used)
 			continue
 		}
-		if dev.Totalmem-dev.Usedmem < requiredSlice {
+		if dev.Totalmem-dev.Usedmem < profileMemoryMiB {
 			reason[common.CardInsufficientMemory]++
-			klog.V(5).InfoS(common.CardInsufficientMemory, "pod", klog.KObj(pod), "device", dev.ID, "device index", i, "device total memory", dev.Totalmem, "device used memory", dev.Usedmem, "request memory", requiredSlice)
+			klog.V(5).InfoS(common.CardInsufficientMemory, "pod", klog.KObj(pod), "device", dev.ID, "device index", i, "device total memory", dev.Totalmem, "device used memory", dev.Usedmem, "request memory", profileMemoryMiB)
+			continue
+		}
+		if dev.Totalcore > 0 && dev.Totalcore-dev.Usedcores < profileCorePercent {
+			reason[common.CardInsufficientCore]++
+			klog.V(5).InfoS(common.CardInsufficientCore, "pod", klog.KObj(pod), "device", dev.ID, "device index", i, "device total core", dev.Totalcore, "device used core", dev.Usedcores, "request cores", profileCorePercent)
 			continue
 		}
 		if k.Nums > 0 {
@@ -401,13 +441,14 @@ func (enf *EnflameDevices) Fit(devices []*device.DeviceUsage, request device.Con
 				Idx:       int(dev.Index),
 				UUID:      dev.ID,
 				Type:      k.Type,
-				Usedmem:   requiredSlice,
-				Usedcores: 0,
+				Usedmem:   profileMemoryMiB,
+				Usedcores: profileCorePercent,
 				CustomInfo: map[string]any{
 					"profileName": profile.Name,
 					"profileID":   profile.ID,
 					"minor":       readCustomInfoString(dev.CustomInfo, "minor"),
 					"index":       readCustomInfoString(dev.CustomInfo, "index"),
+					"drsSlice":    profile.Size,
 					"requestMem":  profile.RequestMemoryGB,
 					"requestCore": profile.RequestCorePercent,
 				},
@@ -439,6 +480,7 @@ type drsProfileCandidate struct {
 	ID                 string
 	Size               int
 	MemoryGB           int
+	CorePercent        int
 	RequestMemoryGB    int
 	RequestCorePercent int
 }
@@ -457,21 +499,15 @@ func (dev *EnflameDevices) selectProfileByRequest(devices []*device.DeviceUsage,
 		return drsProfileCandidate{}, false
 	}
 
-	maxSlice := candidates[len(candidates)-1].Size
 	maxMemGB := candidates[len(candidates)-1].MemoryGB
 	requestMemGB := normalizeMemoryRequestToGB(request.Memreq, maxMemGB)
 	requestCorePercent := int(request.Coresreq)
-
-	requiredSliceByCore := 0
-	if requestCorePercent > 0 {
-		requiredSliceByCore = int(math.Ceil(float64(requestCorePercent) * float64(maxSlice) / 100.0))
-	}
 
 	for _, c := range candidates {
 		if requestMemGB > 0 && c.MemoryGB < requestMemGB {
 			continue
 		}
-		if requiredSliceByCore > 0 && c.Size < requiredSliceByCore {
+		if requestCorePercent > 0 && c.CorePercent < requestCorePercent {
 			continue
 		}
 		c.RequestMemoryGB = requestMemGB
@@ -508,6 +544,26 @@ func parseProfilesFromCustomInfo(customInfo map[string]any) map[string]string {
 }
 
 func collectDRSProfiles(devices []*device.DeviceUsage) []drsProfileCandidate {
+	maxSlice := 0
+	for _, devUsage := range devices {
+		if candidateMaxSlice := readCustomInfoInt(devUsage.CustomInfo, "maxSlice"); candidateMaxSlice > maxSlice {
+			maxSlice = candidateMaxSlice
+		}
+	}
+	if maxSlice <= 0 {
+		for _, devUsage := range devices {
+			for profileName := range parseProfilesFromCustomInfo(devUsage.CustomInfo) {
+				size, _ := parseProfile(profileName)
+				if size > maxSlice {
+					maxSlice = size
+				}
+			}
+		}
+	}
+	if maxSlice <= 0 {
+		return []drsProfileCandidate{}
+	}
+
 	seen := map[string]drsProfileCandidate{}
 	for _, devUsage := range devices {
 		for profileName, profileID := range parseProfilesFromCustomInfo(devUsage.CustomInfo) {
@@ -515,11 +571,13 @@ func collectDRSProfiles(devices []*device.DeviceUsage) []drsProfileCandidate {
 			if size <= 0 || memGB <= 0 {
 				continue
 			}
+			corePercent := int(math.Ceil(float64(size) * 100 / float64(maxSlice)))
 			seen[profileName] = drsProfileCandidate{
-				Name:     profileName,
-				ID:       profileID,
-				Size:     size,
-				MemoryGB: memGB,
+				Name:        profileName,
+				ID:          profileID,
+				Size:        size,
+				MemoryGB:    memGB,
+				CorePercent: corePercent,
 			}
 		}
 	}
@@ -638,6 +696,34 @@ func readCustomInfoString(customInfo map[string]any, key string) string {
 		return strconv.FormatInt(int64(typed), 10)
 	default:
 		return fmt.Sprintf("%v", typed)
+	}
+}
+
+func readCustomInfoInt(customInfo map[string]any, key string) int {
+	if customInfo == nil {
+		return 0
+	}
+	raw, ok := customInfo[key]
+	if !ok {
+		return 0
+	}
+	switch typed := raw.(type) {
+	case int:
+		return typed
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case string:
+		v, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err != nil {
+			return 0
+		}
+		return v
+	default:
+		return 0
 	}
 }
 

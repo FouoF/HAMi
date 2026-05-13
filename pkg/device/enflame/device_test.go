@@ -45,7 +45,7 @@ func TestGetNodeDevices_DRSAnnotation(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Equal(t, len(got), 1)
 	assert.Equal(t, got[0].Type, EnflameVGCUDevice)
-	assert.Equal(t, got[0].Devmem, int32(6))
+	assert.Equal(t, got[0].Devmem, int32(40960))
 	assert.Equal(t, got[0].Count, int32(6))
 	assert.Equal(t, got[0].CustomInfo["minor"], "0")
 }
@@ -164,7 +164,7 @@ func TestFit_SelectProfileByRequest(t *testing.T) {
 			Index:    0,
 			Count:    6,
 			Used:     0,
-			Totalmem: 6,
+			Totalmem: 40960,
 			Type:     EnflameVGCUDevice,
 			CustomInfo: map[string]any{
 				"minor": "0",
@@ -186,7 +186,8 @@ func TestFit_SelectProfileByRequest(t *testing.T) {
 	assert.Equal(t, fit, true)
 	assert.Equal(t, reason, "")
 	assert.Equal(t, len(result[EnflameVGCUDevice]), 1)
-	assert.Equal(t, result[EnflameVGCUDevice][0].Usedmem, int32(3))
+	assert.Equal(t, result[EnflameVGCUDevice][0].Usedmem, int32(20480))
+	assert.Equal(t, result[EnflameVGCUDevice][0].Usedcores, int32(50))
 	assert.Equal(t, result[EnflameVGCUDevice][0].CustomInfo["profileName"], "3g.20gb")
 	assert.Equal(t, result[EnflameVGCUDevice][0].CustomInfo["profileID"], "1")
 }
@@ -199,7 +200,7 @@ func TestFit_SelectProfileByMemoryCoreRequest(t *testing.T) {
 			Index:    0,
 			Count:    6,
 			Used:     0,
-			Totalmem: 6,
+			Totalmem: 40960,
 			Type:     EnflameVGCUDevice,
 			CustomInfo: map[string]any{
 				"minor": "0",
@@ -223,7 +224,8 @@ func TestFit_SelectProfileByMemoryCoreRequest(t *testing.T) {
 	assert.Equal(t, fit, true)
 	assert.Equal(t, reason, "")
 	assert.Equal(t, len(result[EnflameVGCUDevice]), 1)
-	assert.Equal(t, result[EnflameVGCUDevice][0].Usedmem, int32(3))
+	assert.Equal(t, result[EnflameVGCUDevice][0].Usedmem, int32(20480))
+	assert.Equal(t, result[EnflameVGCUDevice][0].Usedcores, int32(50))
 	assert.Equal(t, result[EnflameVGCUDevice][0].CustomInfo["profileName"], "3g.20gb")
 	assert.Equal(t, result[EnflameVGCUDevice][0].CustomInfo["profileID"], "1")
 }
@@ -255,7 +257,7 @@ func TestFit_ProfileNotFound(t *testing.T) {
 			Index:    0,
 			Count:    6,
 			Used:     0,
-			Totalmem: 6,
+			Totalmem: 40960,
 			Type:     EnflameVGCUDevice,
 			CustomInfo: map[string]any{
 				"minor": "0",
@@ -290,15 +292,17 @@ func TestPatchAnnotations_DRSFields(t *testing.T) {
 		EnflameVGCUDevice: {
 			{
 				{
-					Idx:     0,
-					UUID:    "node-a-enflame-drs-0",
-					Type:    EnflameVGCUDevice,
-					Usedmem: 3,
+					Idx:       0,
+					UUID:      "node-a-enflame-drs-0",
+					Type:      EnflameVGCUDevice,
+					Usedmem:   20480,
+					Usedcores: 50,
 					CustomInfo: map[string]any{
 						"minor":       "0",
 						"index":       "0",
 						"profileName": "3g.20gb",
 						"profileID":   "1",
+						"drsSlice":    3,
 					},
 				},
 			},
@@ -306,6 +310,7 @@ func TestPatchAnnotations_DRSFields(t *testing.T) {
 	}
 
 	got := dev.PatchAnnotations(pod, &annoInput, podDevices)
+	assert.Assert(t, strings.Contains(got[device.SupportDevices[EnflameVGCUDevice]], ",20480,50"))
 	assert.Equal(t, got[PodHasAssignedGCU], "false")
 	assert.Equal(t, got[PodAssignedGCUIdx], "0")
 	assert.Equal(t, got[PodAssignedGCUMin], "0")
