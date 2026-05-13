@@ -23,10 +23,17 @@ helm install hami hami-charts/hami --set devices.enflame.enabled=true -n kube-sy
 Default DRS resource:
 
 * `enflame.com/drs-gcu`
+* `enflame.com/gcu-memory`
+* `enflame.com/gcu-core`
 
 ## Run DRS workloads
 
-Request a DRS profile by capacity units (for example `1`, `3`, `6`):
+HAMi supports two request styles:
+
+1. Direct DRS slice request (`enflame.com/drs-gcu`)
+2. Unified memory/core request (`enflame.com/gcu-memory` + `enflame.com/gcu-core`), HAMi converts it to DRS profile internally.
+
+### 1) Direct DRS slice request
 
 ```yaml
 apiVersion: v1
@@ -47,6 +54,31 @@ spec:
           enflame.com/drs-gcu: 3
         requests:
           enflame.com/drs-gcu: 3
+```
+
+### 2) Request by memory/core (recommended unified API)
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gcushare-pod-by-spec
+  namespace: kube-system
+spec:
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: pod-gcu-example1
+      image: ubuntu:18.04
+      imagePullPolicy: IfNotPresent
+      command: ["sleep"]
+      args: ["100000"]
+      resources:
+        limits:
+          enflame.com/gcu-memory: 20480 # MiB
+          enflame.com/gcu-core: 40      # percent
+        requests:
+          enflame.com/gcu-memory: 20480
+          enflame.com/gcu-core: 40
 ```
 
 During scheduling HAMi writes DRS-compatible annotations such as:

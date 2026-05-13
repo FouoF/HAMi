@@ -67,6 +67,8 @@ metax:
 enflame:
   resourceNameGCU: "enflame.com/gcu"
   resourceNameDRSGCU: "enflame.com/drs-gcu"
+  resourceNameGCUMemory: "enflame.com/gcu-memory"
+  resourceNameGCUCore: "enflame.com/gcu-core"
 mthreads:
   resourceCountName: "mthreads.com/vgpu"
   resourceMemoryName: "mthreads.com/sgpu-memory"
@@ -282,6 +284,8 @@ func createEnflameConfig() enflame.EnflameConfig {
 	return enflame.EnflameConfig{
 		ResourceNameGCU:    "enflame.com/gcu",
 		ResourceNameDRSGCU: "enflame.com/drs-gcu",
+		ResourceNameMemory: "enflame.com/gcu-memory",
+		ResourceNameCore:   "enflame.com/gcu-core",
 	}
 }
 

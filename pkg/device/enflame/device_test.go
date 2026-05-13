@@ -109,9 +109,15 @@ func Test_checkType(t *testing.T) {
 }
 
 func TestGenerateResourceRequests(t *testing.T) {
-	InitEnflameDevice(EnflameConfig{ResourceNameDRSGCU: "enflame.com/drs-gcu"})
+	InitEnflameDevice(EnflameConfig{
+		ResourceNameDRSGCU: "enflame.com/drs-gcu",
+		ResourceNameMemory: "enflame.com/gcu-memory",
+		ResourceNameCore:   "enflame.com/gcu-core",
+	})
 	config := EnflameConfig{
 		ResourceNameDRSGCU: "enflame.com/drs-gcu",
+		ResourceNameMemory: "enflame.com/gcu-memory",
+		ResourceNameCore:   "enflame.com/gcu-core",
 	}
 	dev := InitEnflameDevice(config)
 	container := &corev1.Container{
@@ -124,7 +130,30 @@ func TestGenerateResourceRequests(t *testing.T) {
 	req := dev.GenerateResourceRequests(container)
 	assert.Equal(t, req.Nums, int32(1))
 	assert.Equal(t, req.Memreq, int32(3))
+	assert.Equal(t, req.MemPercentagereq, enflameRequestModeDirect)
 	assert.Equal(t, req.Type, EnflameVGCUDevice)
+}
+
+func TestGenerateResourceRequests_ByMemoryCore(t *testing.T) {
+	dev := InitEnflameDevice(EnflameConfig{
+		ResourceNameDRSGCU: "enflame.com/drs-gcu",
+		ResourceNameMemory: "enflame.com/gcu-memory",
+		ResourceNameCore:   "enflame.com/gcu-core",
+	})
+	container := &corev1.Container{
+		Resources: corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				"enflame.com/gcu-memory": resource.MustParse("20480"),
+				"enflame.com/gcu-core":   resource.MustParse("40"),
+			},
+		},
+	}
+	req := dev.GenerateResourceRequests(container)
+	assert.Equal(t, req.Nums, int32(1))
+	assert.Equal(t, req.Type, EnflameVGCUDevice)
+	assert.Equal(t, req.Memreq, int32(20480))
+	assert.Equal(t, req.Coresreq, int32(40))
+	assert.Equal(t, req.MemPercentagereq, enflameRequestModeBySpec)
 }
 
 func TestFit_SelectProfileByRequest(t *testing.T) {
@@ -160,6 +189,62 @@ func TestFit_SelectProfileByRequest(t *testing.T) {
 	assert.Equal(t, result[EnflameVGCUDevice][0].Usedmem, int32(3))
 	assert.Equal(t, result[EnflameVGCUDevice][0].CustomInfo["profileName"], "3g.20gb")
 	assert.Equal(t, result[EnflameVGCUDevice][0].CustomInfo["profileID"], "1")
+}
+
+func TestFit_SelectProfileByMemoryCoreRequest(t *testing.T) {
+	dev := InitEnflameDevice(EnflameConfig{ResourceNameDRSGCU: "enflame.com/drs-gcu"})
+	devices := []*device.DeviceUsage{
+		{
+			ID:       "node-a-enflame-drs-0",
+			Index:    0,
+			Count:    6,
+			Used:     0,
+			Totalmem: 6,
+			Type:     EnflameVGCUDevice,
+			CustomInfo: map[string]any{
+				"minor": "0",
+				"index": "0",
+				"profiles": map[string]string{
+					"1g.6gb":  "0",
+					"3g.20gb": "1",
+					"6g.40gb": "2",
+				},
+			},
+		},
+	}
+	req := device.ContainerDeviceRequest{
+		Nums:             1,
+		Type:             EnflameVGCUDevice,
+		Memreq:           20480, // MiB -> 20GB
+		Coresreq:         40,    // 40% core requirement
+		MemPercentagereq: enflameRequestModeBySpec,
+	}
+	fit, result, reason := dev.Fit(devices, req, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}}}, &device.NodeInfo{}, &device.PodDevices{})
+	assert.Equal(t, fit, true)
+	assert.Equal(t, reason, "")
+	assert.Equal(t, len(result[EnflameVGCUDevice]), 1)
+	assert.Equal(t, result[EnflameVGCUDevice][0].Usedmem, int32(3))
+	assert.Equal(t, result[EnflameVGCUDevice][0].CustomInfo["profileName"], "3g.20gb")
+	assert.Equal(t, result[EnflameVGCUDevice][0].CustomInfo["profileID"], "1")
+}
+
+func TestMutateAdmission_ByMemoryCoreAPI(t *testing.T) {
+	dev := InitEnflameDevice(EnflameConfig{
+		ResourceNameDRSGCU: "enflame.com/drs-gcu",
+		ResourceNameMemory: "enflame.com/gcu-memory",
+		ResourceNameCore:   "enflame.com/gcu-core",
+	})
+	container := &corev1.Container{
+		Resources: corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				"enflame.com/gcu-memory": resource.MustParse("20480"),
+				"enflame.com/gcu-core":   resource.MustParse("50"),
+			},
+		},
+	}
+	found, err := dev.MutateAdmission(container, &corev1.Pod{})
+	assert.NilError(t, err)
+	assert.Equal(t, found, true)
 }
 
 func TestFit_ProfileNotFound(t *testing.T) {

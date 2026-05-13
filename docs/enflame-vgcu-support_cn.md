@@ -23,9 +23,19 @@ DRS 是类似 NVIDIA MIG / Ascend VNPU 的硬切分方案。
 helm install hami hami-charts/hami --set devices.enflame.enabled=true -n kube-system
 ```
 
-> **说明:** 默认 DRS 资源名称为 `enflame.com/drs-gcu`。
+> **说明:** 默认资源名称包括：
+> - `enflame.com/drs-gcu`（直接 DRS 切片请求）
+> - `enflame.com/gcu-memory`（按显存请求，单位 MiB）
+> - `enflame.com/gcu-core`（按算力百分比请求）
 
 ## 运行GCU任务
+
+HAMi 支持两种申请方式：
+
+1. 直接申请 DRS 切片数（`enflame.com/drs-gcu`）
+2. 按显存/算力申请（`enflame.com/gcu-memory` + `enflame.com/gcu-core`），由 HAMi 在调度内部换算为 DRS profile。
+
+### 1）直接申请 DRS 切片
 
 ```yaml
 apiVersion: v1
@@ -50,6 +60,33 @@ spec:
           enflame.com/drs-gcu: 3
 ```
 > **注意:** *查看更多的[用例](../examples/enflame/).*
+
+### 2）按显存/算力申请（统一 API）
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gcushare-pod-by-spec
+  namespace: kube-system
+spec:
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: pod-gcu-example1
+      image: ubuntu:18.04
+      imagePullPolicy: IfNotPresent
+      command:
+        - sleep
+      args:
+        - '100000'
+      resources:
+        limits:
+          enflame.com/gcu-memory: 20480 # MiB
+          enflame.com/gcu-core: 40      # 百分比
+        requests:
+          enflame.com/gcu-memory: 20480
+          enflame.com/gcu-core: 40
+```
 
 ## 注意事项
 

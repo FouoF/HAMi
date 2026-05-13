@@ -52,6 +52,10 @@ const (
 
 	SharedResourceName = "enflame.com/shared-gcu"
 	CountNoSharedName  = "enflame.com/gcu-count"
+
+	enflameRequestModeDirect  int32 = 0
+	enflameRequestModeBySpec  int32 = -1
+	enflameUnknownCoreRequest int32 = 0
 )
 
 type drsCapacitySpec struct {
@@ -82,6 +86,14 @@ func InitEnflameDevice(config EnflameConfig) *EnflameDevices {
 	if EnflameResourceNameDRSGCU == "" {
 		EnflameResourceNameDRSGCU = "enflame.com/drs-gcu"
 	}
+	EnflameResourceNameGCUMemory = config.ResourceNameMemory
+	if EnflameResourceNameGCUMemory == "" {
+		EnflameResourceNameGCUMemory = "enflame.com/gcu-memory"
+	}
+	EnflameResourceNameGCUCore = config.ResourceNameCore
+	if EnflameResourceNameGCUCore == "" {
+		EnflameResourceNameGCUCore = "enflame.com/gcu-core"
+	}
 	EnflameResourceNameVGCU = config.ResourceNameVGCU
 	EnflameResourceNameVGCUPercentage = config.ResourceNameVGCUPercentage
 	_, ok := device.SupportDevices[EnflameVGCUDevice]
@@ -98,18 +110,8 @@ func (dev *EnflameDevices) CommonWord() string {
 func (dev *EnflameDevices) MutateAdmission(ctr *corev1.Container, p *corev1.Pod) (bool, error) {
 	resourceCount := corev1.ResourceName(EnflameResourceNameDRSGCU)
 	count, ok := ctr.Resources.Limits[resourceCount]
-	if ok {
-		if count.Value() <= 0 {
-			return false, fmt.Errorf("%s must be greater than 0", EnflameResourceNameDRSGCU)
-		}
-	} else {
+	if !ok {
 		count, ok = ctr.Resources.Requests[resourceCount]
-		if !ok {
-			return false, nil
-		}
-		if count.Value() <= 0 {
-			return false, fmt.Errorf("%s must be greater than 0", EnflameResourceNameDRSGCU)
-		}
 	}
 	if ctr.Resources.Limits == nil {
 		ctr.Resources.Limits = corev1.ResourceList{}
@@ -117,11 +119,56 @@ func (dev *EnflameDevices) MutateAdmission(ctr *corev1.Container, p *corev1.Pod)
 	if ctr.Resources.Requests == nil {
 		ctr.Resources.Requests = corev1.ResourceList{}
 	}
-	if _, exists := ctr.Resources.Limits[resourceCount]; !exists {
-		ctr.Resources.Limits[resourceCount] = count
+
+	// Direct DRS API: enflame.com/drs-gcu
+	if ok {
+		if count.Value() <= 0 {
+			return false, fmt.Errorf("%s must be greater than 0", EnflameResourceNameDRSGCU)
+		}
+		if _, exists := ctr.Resources.Limits[resourceCount]; !exists {
+			ctr.Resources.Limits[resourceCount] = count
+		}
+		if _, exists := ctr.Resources.Requests[resourceCount]; !exists {
+			ctr.Resources.Requests[resourceCount] = count
+		}
+		return true, nil
 	}
-	if _, exists := ctr.Resources.Requests[resourceCount]; !exists {
-		ctr.Resources.Requests[resourceCount] = count
+
+	// Unified API: request by memory/core, then convert profile in Fit().
+	memReq, hasMem := getContainerResourceRequest(ctr, corev1.ResourceName(EnflameResourceNameGCUMemory))
+	coreReq, hasCore := getContainerResourceRequest(ctr, corev1.ResourceName(EnflameResourceNameGCUCore))
+	if !hasMem && !hasCore {
+		return false, nil
+	}
+	if hasMem && memReq <= 0 {
+		return false, fmt.Errorf("%s must be greater than 0", EnflameResourceNameGCUMemory)
+	}
+	if hasCore && (coreReq <= 0 || coreReq > 100) {
+		return false, fmt.Errorf("%s must be in range (0,100]", EnflameResourceNameGCUCore)
+	}
+	if hasMem {
+		memQty := ctr.Resources.Limits[corev1.ResourceName(EnflameResourceNameGCUMemory)]
+		if memQty.IsZero() {
+			memQty = ctr.Resources.Requests[corev1.ResourceName(EnflameResourceNameGCUMemory)]
+		}
+		if _, exists := ctr.Resources.Limits[corev1.ResourceName(EnflameResourceNameGCUMemory)]; !exists {
+			ctr.Resources.Limits[corev1.ResourceName(EnflameResourceNameGCUMemory)] = memQty
+		}
+		if _, exists := ctr.Resources.Requests[corev1.ResourceName(EnflameResourceNameGCUMemory)]; !exists {
+			ctr.Resources.Requests[corev1.ResourceName(EnflameResourceNameGCUMemory)] = memQty
+		}
+	}
+	if hasCore {
+		coreQty := ctr.Resources.Limits[corev1.ResourceName(EnflameResourceNameGCUCore)]
+		if coreQty.IsZero() {
+			coreQty = ctr.Resources.Requests[corev1.ResourceName(EnflameResourceNameGCUCore)]
+		}
+		if _, exists := ctr.Resources.Limits[corev1.ResourceName(EnflameResourceNameGCUCore)]; !exists {
+			ctr.Resources.Limits[corev1.ResourceName(EnflameResourceNameGCUCore)] = coreQty
+		}
+		if _, exists := ctr.Resources.Requests[corev1.ResourceName(EnflameResourceNameGCUCore)]; !exists {
+			ctr.Resources.Requests[corev1.ResourceName(EnflameResourceNameGCUCore)] = coreQty
+		}
 	}
 	return true, nil
 }
@@ -266,10 +313,31 @@ func (dev *EnflameDevices) GenerateResourceRequests(ctr *corev1.Container) devic
 				Nums:             1,
 				Type:             EnflameVGCUDevice,
 				Memreq:           int32(n),
-				MemPercentagereq: 0,
-				Coresreq:         0,
+				MemPercentagereq: enflameRequestModeDirect,
+				Coresreq:         enflameUnknownCoreRequest,
 			}
 		}
+	}
+	memReq, hasMem := getContainerResourceRequest(ctr, corev1.ResourceName(EnflameResourceNameGCUMemory))
+	coreReq, hasCore := getContainerResourceRequest(ctr, corev1.ResourceName(EnflameResourceNameGCUCore))
+	if !hasMem && !hasCore {
+		return device.ContainerDeviceRequest{}
+	}
+	if hasMem && memReq > math.MaxInt32 {
+		klog.ErrorS(nil, "gcu memory request is too large", "container", ctr.Name, "request", memReq)
+		return device.ContainerDeviceRequest{}
+	}
+	if hasCore && coreReq > math.MaxInt32 {
+		klog.ErrorS(nil, "gcu core request is too large", "container", ctr.Name, "request", coreReq)
+		return device.ContainerDeviceRequest{}
+	}
+	klog.Info("Found enflame memory/core based request")
+	return device.ContainerDeviceRequest{
+		Nums:             1,
+		Type:             EnflameVGCUDevice,
+		Memreq:           int32(memReq),
+		MemPercentagereq: enflameRequestModeBySpec,
+		Coresreq:         int32(coreReq),
 	}
 	return device.ContainerDeviceRequest{}
 }
@@ -291,8 +359,13 @@ func (enf *EnflameDevices) Fit(devices []*device.DeviceUsage, request device.Con
 	klog.InfoS("Allocating device for container request", "pod", klog.KObj(pod), "card request", k)
 	tmpDevs := make(map[string]device.ContainerDevices)
 	reason := make(map[string]int)
-	profileName, profileID, profileMatch := enf.selectProfileByRequest(devices, int(k.Memreq))
+	profile, profileMatch := enf.selectProfileByRequest(devices, k)
 	if !profileMatch {
+		reason[common.ModeNotFit]++
+		return false, tmpDevs, common.GenReason(reason, len(devices))
+	}
+	requiredSlice := int32(profile.Size)
+	if requiredSlice <= 0 {
 		reason[common.ModeNotFit]++
 		return false, tmpDevs, common.GenReason(reason, len(devices))
 	}
@@ -312,18 +385,14 @@ func (enf *EnflameDevices) Fit(devices []*device.DeviceUsage, request device.Con
 			continue
 		}
 
-		if k.Memreq <= 0 {
-			reason[common.ModeNotFit]++
-			continue
-		}
 		if dev.Count <= dev.Used {
 			reason[common.CardTimeSlicingExhausted]++
 			klog.V(5).InfoS(common.CardTimeSlicingExhausted, "pod", klog.KObj(pod), "device", dev.ID, "count", dev.Count, "used", dev.Used)
 			continue
 		}
-		if dev.Totalmem-dev.Usedmem < k.Memreq {
+		if dev.Totalmem-dev.Usedmem < requiredSlice {
 			reason[common.CardInsufficientMemory]++
-			klog.V(5).InfoS(common.CardInsufficientMemory, "pod", klog.KObj(pod), "device", dev.ID, "device index", i, "device total memory", dev.Totalmem, "device used memory", dev.Usedmem, "request memory", k.Memreq)
+			klog.V(5).InfoS(common.CardInsufficientMemory, "pod", klog.KObj(pod), "device", dev.ID, "device index", i, "device total memory", dev.Totalmem, "device used memory", dev.Usedmem, "request memory", requiredSlice)
 			continue
 		}
 		if k.Nums > 0 {
@@ -333,13 +402,15 @@ func (enf *EnflameDevices) Fit(devices []*device.DeviceUsage, request device.Con
 				Idx:       int(dev.Index),
 				UUID:      dev.ID,
 				Type:      k.Type,
-				Usedmem:   k.Memreq,
+				Usedmem:   requiredSlice,
 				Usedcores: 0,
 				CustomInfo: map[string]any{
-					"profileName": profileName,
-					"profileID":   profileID,
+					"profileName": profile.Name,
+					"profileID":   profile.ID,
 					"minor":       readCustomInfoString(dev.CustomInfo, "minor"),
 					"index":       readCustomInfoString(dev.CustomInfo, "index"),
+					"requestMem":  profile.RequestMemoryGB,
+					"requestCore": profile.RequestCorePercent,
 				},
 			})
 		}
@@ -359,33 +430,56 @@ func (enf *EnflameDevices) Fit(devices []*device.DeviceUsage, request device.Con
 func (dev *EnflameDevices) GetResourceNames() device.ResourceNames {
 	return device.ResourceNames{
 		ResourceCountName:  EnflameResourceNameDRSGCU,
-		ResourceMemoryName: "",
-		ResourceCoreName:   "",
+		ResourceMemoryName: EnflameResourceNameGCUMemory,
+		ResourceCoreName:   EnflameResourceNameGCUCore,
 	}
 }
 
-func (dev *EnflameDevices) selectProfileByRequest(devices []*device.DeviceUsage, requestSize int) (string, string, bool) {
-	if requestSize <= 0 {
-		return "", "", false
+type drsProfileCandidate struct {
+	Name               string
+	ID                 string
+	Size               int
+	MemoryGB           int
+	RequestMemoryGB    int
+	RequestCorePercent int
+}
+
+func (dev *EnflameDevices) selectProfileByRequest(devices []*device.DeviceUsage, request device.ContainerDeviceRequest) (drsProfileCandidate, bool) {
+	candidates := collectDRSProfiles(devices)
+	if len(candidates) == 0 {
+		return drsProfileCandidate{}, false
 	}
-	matched := map[string]string{}
-	for _, devUsage := range devices {
-		profiles := parseProfilesFromCustomInfo(devUsage.CustomInfo)
-		for profileName, profileID := range profiles {
-			if parseProfileSize(profileName) == requestSize {
-				matched[profileName] = profileID
+	if request.MemPercentagereq == enflameRequestModeDirect {
+		for _, c := range candidates {
+			if c.Size == int(request.Memreq) {
+				return c, true
 			}
 		}
+		return drsProfileCandidate{}, false
 	}
-	if len(matched) == 0 {
-		return "", "", false
+
+	maxSlice := candidates[len(candidates)-1].Size
+	maxMemGB := candidates[len(candidates)-1].MemoryGB
+	requestMemGB := normalizeMemoryRequestToGB(request.Memreq, maxMemGB)
+	requestCorePercent := int(request.Coresreq)
+
+	requiredSliceByCore := 0
+	if requestCorePercent > 0 {
+		requiredSliceByCore = int(math.Ceil(float64(requestCorePercent) * float64(maxSlice) / 100.0))
 	}
-	names := make([]string, 0, len(matched))
-	for name := range matched {
-		names = append(names, name)
+
+	for _, c := range candidates {
+		if requestMemGB > 0 && c.MemoryGB < requestMemGB {
+			continue
+		}
+		if requiredSliceByCore > 0 && c.Size < requiredSliceByCore {
+			continue
+		}
+		c.RequestMemoryGB = requestMemGB
+		c.RequestCorePercent = requestCorePercent
+		return c, true
 	}
-	sort.Strings(names)
-	return names[0], matched[names[0]], true
+	return drsProfileCandidate{}, false
 }
 
 func parseProfilesFromCustomInfo(customInfo map[string]any) map[string]string {
@@ -414,17 +508,78 @@ func parseProfilesFromCustomInfo(customInfo map[string]any) map[string]string {
 	}
 }
 
+func collectDRSProfiles(devices []*device.DeviceUsage) []drsProfileCandidate {
+	seen := map[string]drsProfileCandidate{}
+	for _, devUsage := range devices {
+		for profileName, profileID := range parseProfilesFromCustomInfo(devUsage.CustomInfo) {
+			size, memGB := parseProfile(profileName)
+			if size <= 0 || memGB <= 0 {
+				continue
+			}
+			seen[profileName] = drsProfileCandidate{
+				Name:     profileName,
+				ID:       profileID,
+				Size:     size,
+				MemoryGB: memGB,
+			}
+		}
+	}
+	candidates := make([]drsProfileCandidate, 0, len(seen))
+	for _, c := range seen {
+		candidates = append(candidates, c)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Size == candidates[j].Size {
+			return candidates[i].MemoryGB < candidates[j].MemoryGB
+		}
+		return candidates[i].Size < candidates[j].Size
+	})
+	return candidates
+}
+
 func parseProfileSize(profileName string) int {
-	normalized := strings.ToLower(strings.TrimSpace(profileName))
-	idx := strings.Index(normalized, "g")
-	if idx <= 0 {
-		return 0
-	}
-	size, err := strconv.Atoi(normalized[:idx])
-	if err != nil {
-		return 0
-	}
+	size, _ := parseProfile(profileName)
 	return size
+}
+
+func parseProfileMemoryGB(profileName string) int {
+	_, memoryGB := parseProfile(profileName)
+	return memoryGB
+}
+
+func parseProfile(profileName string) (int, int) {
+	normalized := strings.ToLower(strings.TrimSpace(profileName))
+	parts := strings.Split(normalized, ".")
+	if len(parts) < 2 {
+		return 0, 0
+	}
+	sizePart := strings.TrimSpace(parts[0])
+	sizePart = strings.TrimSuffix(sizePart, "g")
+	size, err := strconv.Atoi(sizePart)
+	if err != nil {
+		return 0, 0
+	}
+	memPart := strings.TrimSpace(parts[1])
+	memPart = strings.TrimSuffix(memPart, "gb")
+	memGB, err := strconv.Atoi(memPart)
+	if err != nil {
+		return size, 0
+	}
+	return size, memGB
+}
+
+func normalizeMemoryRequestToGB(rawMemory int32, maxProfileMemoryGB int) int {
+	if rawMemory <= 0 {
+		return 0
+	}
+	if maxProfileMemoryGB <= 0 {
+		return int(rawMemory)
+	}
+	// If the request value is much larger than profile-GB units, treat it as MiB.
+	if int(rawMemory) > maxProfileMemoryGB*2 {
+		return int(math.Ceil(float64(rawMemory) / 1024.0))
+	}
+	return int(rawMemory)
 }
 
 func parseDRSCapacity(raw any) (int32, error) {
@@ -485,4 +640,17 @@ func readCustomInfoString(customInfo map[string]any, key string) string {
 	default:
 		return fmt.Sprintf("%v", typed)
 	}
+}
+
+func getContainerResourceRequest(ctr *corev1.Container, resourceName corev1.ResourceName) (int64, bool) {
+	if ctr == nil || resourceName == "" {
+		return 0, false
+	}
+	if qty, ok := ctr.Resources.Limits[resourceName]; ok {
+		return qty.Value(), true
+	}
+	if qty, ok := ctr.Resources.Requests[resourceName]; ok {
+		return qty.Value(), true
+	}
+	return 0, false
 }

@@ -248,6 +248,8 @@ data:
     enflame:
       resourceNameGCU: "enflame.com/gcu"
       resourceNameDRSGCU: {{ .Values.enflameResourceNameDRSGCU }}
+      resourceNameGCUMemory: {{ .Values.enflameResourceNameGCUMemory }}
+      resourceNameGCUCore: {{ .Values.enflameResourceNameGCUCore }}
     mthreads:
       resourceCountName: "mthreads.com/vgpu"
       resourceMemoryName: "mthreads.com/sgpu-memory"

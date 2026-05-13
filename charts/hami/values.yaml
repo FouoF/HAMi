@@ -46,6 +46,8 @@ metaxsGPUTopologyAware: "false"
 
 #Enflame DRS Parameters
 enflameResourceNameDRSGCU: "enflame.com/drs-gcu"
+enflameResourceNameGCUMemory: "enflame.com/gcu-memory"
+enflameResourceNameGCUCore: "enflame.com/gcu-core"
 
 #Kunlun XPU Parameters
 kunlunResourceName: "kunlunxin.com/xpu"
@@ -458,6 +460,8 @@ devices:
     enabled: true
     customresources:
       - enflame.com/drs-gcu
+      - enflame.com/gcu-memory
+      - enflame.com/gcu-core
       - enflame.com/gcu
   mthreads:
     enabled: true
