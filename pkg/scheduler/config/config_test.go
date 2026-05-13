@@ -66,8 +66,7 @@ metax:
   resourceCountName: "metax-tech.com/gpu"
 enflame:
   resourceNameGCU: "enflame.com/gcu"
-  resourceNameVGCU: "enflame.com/vgcu"
-  resourceNameVGCUPercentage: "enflame.com/vgcu-percentage"
+  resourceNameDRSGCU: "enflame.com/drs-gcu"
 mthreads:
   resourceCountName: "mthreads.com/vgpu"
   resourceMemoryName: "mthreads.com/sgpu-memory"
@@ -281,9 +280,8 @@ func createMetaxConfig() metax.MetaxConfig {
 
 func createEnflameConfig() enflame.EnflameConfig {
 	return enflame.EnflameConfig{
-		ResourceNameGCU:            "enflame.com/gcu",
-		ResourceNameVGCU:           "enflame.com/vgcu",
-		ResourceNameVGCUPercentage: "enflame.com/vgcu-percentage",
+		ResourceNameGCU:    "enflame.com/gcu",
+		ResourceNameDRSGCU: "enflame.com/drs-gcu",
 	}
 }
 

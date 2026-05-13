@@ -247,8 +247,7 @@ data:
       sgpuTopologyAware: {{ .Values.metaxsGPUTopologyAware }}
     enflame:
       resourceNameGCU: "enflame.com/gcu"
-      resourceNameVGCU: {{ .Values.enflameResourceNameVGCU }}
-      resourceNameVGCUPercentage: {{ .Values.enflameResourceNameVGCUPercentage }}
+      resourceNameDRSGCU: {{ .Values.enflameResourceNameDRSGCU }}
     mthreads:
       resourceCountName: "mthreads.com/vgpu"
       resourceMemoryName: "mthreads.com/sgpu-memory"
