@@ -19,6 +19,7 @@ package enflame
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"sort"
 	"strconv"
@@ -197,9 +198,7 @@ func (dev *EnflameDevices) GetNodeDevices(n corev1.Node) ([]*device.DeviceInfo, 
 			minor = strconv.Itoa(devIndex)
 		}
 		profiles := map[string]string{}
-		for name, profileID := range spec.Profiles {
-			profiles[name] = profileID
-		}
+		maps.Copy(profiles, spec.Profiles)
 		nodedevices = append(nodedevices, &device.DeviceInfo{
 			Index:        uint(devIndex),
 			ID:           fmt.Sprintf("%s-enflame-drs-%d", n.Name, devIndex),
