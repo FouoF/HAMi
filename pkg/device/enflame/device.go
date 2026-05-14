@@ -360,7 +360,6 @@ func (dev *EnflameDevices) GenerateResourceRequests(ctr *corev1.Container) devic
 		MemPercentagereq: enflameRequestModeBySpec,
 		Coresreq:         int32(coreReq),
 	}
-	return device.ContainerDeviceRequest{}
 }
 
 func (dev *EnflameDevices) ScoreNode(node *corev1.Node, podDevices device.PodSingleDevice, previous []*device.DeviceUsage, policy string) float32 {
@@ -592,16 +591,6 @@ func collectDRSProfiles(devices []*device.DeviceUsage) []drsProfileCandidate {
 		return candidates[i].Size < candidates[j].Size
 	})
 	return candidates
-}
-
-func parseProfileSize(profileName string) int {
-	size, _ := parseProfile(profileName)
-	return size
-}
-
-func parseProfileMemoryGB(profileName string) int {
-	_, memoryGB := parseProfile(profileName)
-	return memoryGB
 }
 
 func parseProfile(profileName string) (int, int) {
