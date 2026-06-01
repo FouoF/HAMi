@@ -145,11 +145,9 @@ func (s *Scheduler) onAddPod(obj any) {
 		return
 	}
 	if util.IsPodInTerminatedState(pod) {
-		pi, ok := s.podManager.GetPod(pod)
-		if ok {
+		if pi, ok := s.podManager.TakeAndDeletePod(pod); ok {
 			s.quotaManager.RmUsage(pod, pi.Devices)
 		}
-		s.podManager.DelPod(pod)
 		return
 	}
 	if util.IsPodTerminating(pod) {
@@ -195,10 +193,8 @@ func (s *Scheduler) onDelPod(obj any) {
 	if !ok {
 		return
 	}
-	pi, ok := s.podManager.GetPod(pod)
-	if ok {
+	if pi, ok := s.podManager.TakeAndDeletePod(pod); ok {
 		s.quotaManager.RmUsage(pod, pi.Devices)
-		s.podManager.DelPod(pod)
 	}
 }
 
@@ -744,7 +740,9 @@ func (s *Scheduler) Filter(args extenderv1.ExtenderArgs) (*extenderv1.ExtenderFi
 			Error:       "",
 		}, nil
 	}
-	s.podManager.DelPod(args.Pod)
+	if pi, ok := s.podManager.TakeAndDeletePod(args.Pod); ok {
+		s.quotaManager.RmUsage(args.Pod, pi.Devices)
+	}
 	nodeUsage, failedNodes, err := s.getNodesUsage(args.NodeNames, args.Pod)
 	if err != nil {
 		s.recordScheduleFilterResultEvent(args.Pod, EventReasonFilteringFailed, "", err)
@@ -784,12 +782,17 @@ func (s *Scheduler) Filter(args extenderv1.ExtenderArgs) (*extenderv1.ExtenderFi
 		val.PatchAnnotations(args.Pod, &annotations, m.Devices)
 	}
 
-	if s.podManager.AddPod(args.Pod, m.NodeID, m.Devices) {
+	added := s.podManager.AddPod(args.Pod, m.NodeID, m.Devices)
+	if added {
 		s.quotaManager.AddUsage(args.Pod, m.Devices)
 	}
+
 	err = util.PatchPodAnnotations(args.Pod, annotations)
 	if err != nil {
 		s.recordScheduleFilterResultEvent(args.Pod, EventReasonFilteringFailed, "", err)
+		if added {
+			s.quotaManager.RmUsage(args.Pod, m.Devices)
+		}
 		s.podManager.DelPod(args.Pod)
 		return nil, err
 	}
