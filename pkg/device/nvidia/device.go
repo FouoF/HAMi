@@ -63,8 +63,11 @@ const (
 	HamiCoreMode = "hami-core"
 	MpsMode      = "mps"
 	// RemoteMode marks a GPU this node serves over the network through lupine
-	// rather than to pods of its own. The remote-gpu backend hands such a card
-	// out cluster wide, so this backend must leave it alone.
+	// rather than to pods of its own. It is configured per-node via
+	// operatingmode in the device-plugin ConfigMap (peer to hami-core / mig);
+	// the device plugin then applies the lupine-server discovery label. The
+	// remote-gpu backend hands such a card out cluster wide, so this backend
+	// must leave it alone.
 	RemoteMode = "remote"
 )
 
@@ -145,8 +148,11 @@ type FilterDevice struct {
 type DevicePluginConfigs struct {
 	Nodeconfig []struct {
 		// These configs is shared and will overwrite those in NvidiaConfig.
-		NodeDefaultConfig            `json:",inline"`
-		Name                         string        `json:"name"`
+		NodeDefaultConfig `json:",inline"`
+		Name              string `json:"name"`
+		// OperatingMode is the per-node GPU operating mode: hami-core, mig, or
+		// remote. remote makes the node a lupine server; the device plugin
+		// applies the hami.io/lupine-server discovery label to match.
 		OperatingMode                string        `json:"operatingmode"`
 		Migstrategy                  string        `json:"migstrategy"`
 		FilterDevice                 *FilterDevice `json:"filterdevices"`

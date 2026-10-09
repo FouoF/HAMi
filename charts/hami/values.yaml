@@ -420,6 +420,9 @@ devicePlugin:
   # so this stays here rather than under devices.<vendor>.
   reportNodeCapacity: false
   # Node configuration for device plugin, Priority: externalConfigName > config > default config
+  # operatingmode is per-node: "hami-core", "mig", or "remote".
+  # "remote" makes this node a lupine GPU server; the device plugin applies the
+  # hami.io/lupine-server discovery label (empty value = devices.remotegpu.defaultPort).
   nodeConfiguration:
     # If you want to use a custom config.json, you can set the content here.
     # If this is set, it will override the default config.json(An example is as follows).
@@ -638,8 +641,10 @@ devices:
     libCudaLogLevel: 1
   remotegpu:
     # Schedule pods onto GPUs served over the network by a lupine server.
-    # Label each lupine node with hami.io/lupine-server, optionally setting the
-    # label value to the port lupine listens on.
+    # Mark lupine nodes with operatingmode: remote in devicePlugin.nodeConfiguration
+    # (peer to hami-core / mig). The device plugin applies hami.io/lupine-server;
+    # set that label's value to a custom port only when the server is managed
+    # outside the chart (empty value uses defaultPort below).
     enabled: false
     defaultPort: 14833
     resourceCountName: "nvidia.com/remote-gpu"
@@ -669,7 +674,8 @@ devices:
       # works under the NVIDIA container runtime. Name the RuntimeClass that
       # selects it when the cluster does not make it the default, commonly
       # "nvidia". It has its own setting rather than borrowing the device
-      # plugin's, because in remote mode that plugin may not run at all.
+      # plugin's: in remote mode that plugin still runs, but only publishes the
+      # fleet annotation and does not need the NVIDIA runtime itself.
       runtimeClassName: ""
       tolerations: []
       resources: {}
